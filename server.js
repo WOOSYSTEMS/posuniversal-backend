@@ -86,6 +86,6 @@ app.post("/refund", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`POSUniversal backend running on port ${PORT}`);
 });
