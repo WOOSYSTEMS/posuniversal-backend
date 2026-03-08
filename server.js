@@ -53,7 +53,7 @@ app.post("/create-payment-intent", async (req, res) => {
       amount: Math.round(amount), // amount in cents
       currency,
       description,
-      payment_method_types: ["card_present"],
+      payment_method_types: ["card_present", "interac_present"],
       capture_method: "automatic",
       metadata: {
         source: "POSUniversal",
