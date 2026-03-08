@@ -18,10 +18,24 @@ app.get("/", (req, res) => {
 // The iOS app calls this endpoint to get a token for connecting to the Stripe Terminal reader
 app.post("/connection-token", async (req, res) => {
   try {
-    const token = await stripe.terminal.connectionTokens.create();
+    const { location_id } = req.body || {};
+    const params = {};
+    if (location_id) params.location = location_id;
+    const token = await stripe.terminal.connectionTokens.create(params);
     res.json({ secret: token.secret });
   } catch (error) {
     console.error("Connection token error:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// List Terminal locations
+app.get("/locations", async (req, res) => {
+  try {
+    const locations = await stripe.terminal.locations.list({ limit: 100 });
+    res.json(locations.data);
+  } catch (error) {
+    console.error("Locations error:", error.message);
     res.status(500).json({ error: error.message });
   }
 });
