@@ -40,6 +40,40 @@ app.get("/locations", async (req, res) => {
   }
 });
 
+// Create or update a Terminal location for a vendor
+app.post("/location", async (req, res) => {
+  try {
+    const { display_name, location_id } = req.body;
+    if (!display_name) {
+      return res.status(400).json({ error: "display_name is required" });
+    }
+
+    if (location_id) {
+      // Update existing location
+      const location = await stripe.terminal.locations.update(location_id, {
+        display_name,
+      });
+      return res.json({ id: location.id, display_name: location.display_name });
+    }
+
+    // Create new location
+    const location = await stripe.terminal.locations.create({
+      display_name,
+      address: {
+        line1: "Kamloops, BC",
+        city: "Kamloops",
+        state: "BC",
+        postal_code: "V2C 1A1",
+        country: "CA",
+      },
+    });
+    res.json({ id: location.id, display_name: location.display_name });
+  } catch (error) {
+    console.error("Location error:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Create a PaymentIntent for Tap to Pay
 app.post("/create-payment-intent", async (req, res) => {
   try {
