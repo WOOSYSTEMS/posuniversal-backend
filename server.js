@@ -8,7 +8,7 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 4242;
-const APP_FEE_PERCENT = parseInt(process.env.APP_FEE_PERCENT || "5"); // Your cut: 5% default
+const APP_FEE_PERCENT = parseFloat(process.env.APP_FEE_PERCENT || "0.5"); // Your cut: 0.5% default
 
 // Health check
 app.get("/", (req, res) => {
