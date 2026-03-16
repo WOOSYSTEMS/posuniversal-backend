@@ -5,10 +5,85 @@ const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
 app.use(cors());
-app.use(express.json());
 
 const PORT = process.env.PORT || 4242;
 const APP_FEE_PERCENT = parseFloat(process.env.APP_FEE_PERCENT || "0.5"); // Your cut: 0.5% default
+
+// ============================================
+// STRIPE WEBHOOKS - Tiered Platform Fees
+// ============================================
+// IMPORTANT: Webhook route MUST come before express.json() middleware
+// because Stripe needs the raw body for signature verification
+
+app.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+  const sig = req.headers["stripe-signature"];
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+  if (!webhookSecret) {
+    console.log("⚠️  Webhook secret not configured, skipping signature verification");
+    return res.status(400).send("Webhook secret not configured");
+  }
+
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+  } catch (err) {
+    console.log(`⚠️  Webhook signature verification failed:`, err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  // Handle payment_intent.succeeded for tiered fee calculation
+  if (event.type === "payment_intent.succeeded") {
+    const paymentIntent = event.data.object;
+
+    try {
+      // Check if payment method is Interac
+      const paymentMethod = await stripe.paymentMethods.retrieve(
+        paymentIntent.payment_method
+      );
+
+      // Interac gets 1.0% fee, credit cards get 0.5% fee
+      const isInterac = paymentMethod.type === "interac_present";
+      const feePercent = isInterac ? 1.0 : APP_FEE_PERCENT;
+
+      console.log(`💳 Payment ${paymentIntent.id}: ${paymentMethod.type} - ${feePercent}% fee`);
+
+      // If Interac and we have a connected account, adjust the fee
+      if (isInterac && paymentIntent.transfer_data?.destination) {
+        const baseFeePaid = Math.round(paymentIntent.amount * (APP_FEE_PERCENT / 100));
+        const targetFee = Math.round(paymentIntent.amount * (feePercent / 100));
+        const additionalFee = targetFee - baseFeePaid;
+
+        if (additionalFee > 0) {
+          // Create an additional transfer to collect the extra 0.5% for Interac
+          await stripe.transfers.create({
+            amount: additionalFee,
+            currency: paymentIntent.currency,
+            destination: process.env.STRIPE_PLATFORM_ACCOUNT || "self",
+            source_transaction: paymentIntent.charges.data[0].id,
+            description: `Interac surcharge for ${paymentIntent.id}`,
+            metadata: {
+              payment_intent: paymentIntent.id,
+              fee_type: "interac_surcharge",
+            },
+          }, {
+            stripeAccount: paymentIntent.transfer_data.destination,
+          });
+
+          console.log(`✅ Applied additional ${additionalFee} cents Interac fee`);
+        }
+      }
+    } catch (error) {
+      console.error("Error processing webhook:", error.message);
+      // Don't fail the webhook - return 200 so Stripe doesn't retry
+    }
+  }
+
+  res.json({ received: true });
+});
+
+// Now apply express.json() to all other routes
+app.use(express.json());
 
 // Health check
 app.get("/", (req, res) => {
@@ -312,77 +387,6 @@ app.post("/check-interac", async (req, res) => {
     console.error("Check Interac error:", error.message);
     res.status(500).json({ error: error.message });
   }
-});
-
-// ============================================
-// STRIPE WEBHOOKS - Tiered Platform Fees
-// ============================================
-
-// Webhook endpoint for handling payment events
-app.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
-  const sig = req.headers["stripe-signature"];
-  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
-
-  if (!webhookSecret) {
-    console.log("⚠️  Webhook secret not configured, skipping signature verification");
-    return res.status(400).send("Webhook secret not configured");
-  }
-
-  let event;
-  try {
-    event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
-  } catch (err) {
-    console.log(`⚠️  Webhook signature verification failed:`, err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
-
-  // Handle payment_intent.succeeded for tiered fee calculation
-  if (event.type === "payment_intent.succeeded") {
-    const paymentIntent = event.data.object;
-
-    try {
-      // Check if payment method is Interac
-      const paymentMethod = await stripe.paymentMethods.retrieve(
-        paymentIntent.payment_method
-      );
-
-      // Interac gets 1.0% fee, credit cards get 0.5% fee
-      const isInterac = paymentMethod.type === "interac_present";
-      const feePercent = isInterac ? 1.0 : APP_FEE_PERCENT;
-
-      console.log(`Payment ${paymentIntent.id}: ${paymentMethod.type} - ${feePercent}% fee`);
-
-      // If Interac and we have a connected account, adjust the fee
-      if (isInterac && paymentIntent.transfer_data?.destination) {
-        const baseFeePaid = Math.round(paymentIntent.amount * (APP_FEE_PERCENT / 100));
-        const targetFee = Math.round(paymentIntent.amount * (feePercent / 100));
-        const additionalFee = targetFee - baseFeePaid;
-
-        if (additionalFee > 0) {
-          // Create an additional transfer to collect the extra 0.5% for Interac
-          await stripe.transfers.create({
-            amount: additionalFee,
-            currency: paymentIntent.currency,
-            destination: process.env.STRIPE_PLATFORM_ACCOUNT || "self",
-            source_transaction: paymentIntent.charges.data[0].id,
-            description: `Interac surcharge for ${paymentIntent.id}`,
-            metadata: {
-              payment_intent: paymentIntent.id,
-              fee_type: "interac_surcharge",
-            },
-          }, {
-            stripeAccount: paymentIntent.transfer_data.destination,
-          });
-
-          console.log(`✓ Applied additional ${additionalFee} cents Interac fee`);
-        }
-      }
-    } catch (err) {
-      console.error("Error processing tiered fee:", err.message);
-    }
-  }
-
-  res.json({ received: true });
 });
 
 app.listen(PORT, "0.0.0.0", () => {
