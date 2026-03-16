@@ -222,6 +222,11 @@ app.post("/create-payment-intent", async (req, res) => {
       description,
       payment_method_types: ["card_present", "interac_present"],
       capture_method: "automatic",
+      payment_method_options: {
+        card_present: {
+          request_extended_authorization: false,
+        },
+      },
       metadata: {
         source: "POSUniversal",
         project: "Hannibal",
@@ -279,7 +284,108 @@ app.post("/refund", async (req, res) => {
   }
 });
 
+// Check if a payment was made with Interac
+app.post("/check-interac", async (req, res) => {
+  try {
+    const { payment_intent_id } = req.body;
+    if (!payment_intent_id) {
+      return res.status(400).json({ error: "payment_intent_id is required" });
+    }
+
+    const paymentIntent = await stripe.paymentIntents.retrieve(payment_intent_id);
+
+    if (paymentIntent.payment_method) {
+      const paymentMethod = await stripe.paymentMethods.retrieve(
+        paymentIntent.payment_method
+      );
+
+      res.json({
+        is_interac: paymentMethod.type === "interac_present",
+        payment_method_type: paymentMethod.type,
+        card_brand: paymentMethod.card_present?.brand || paymentMethod.interac_present?.brand,
+        last4: paymentMethod.card_present?.last4 || paymentMethod.interac_present?.last4,
+      });
+    } else {
+      res.json({ is_interac: false, payment_method_type: "unknown" });
+    }
+  } catch (error) {
+    console.error("Check Interac error:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// STRIPE WEBHOOKS - Tiered Platform Fees
+// ============================================
+
+// Webhook endpoint for handling payment events
+app.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+  const sig = req.headers["stripe-signature"];
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+  if (!webhookSecret) {
+    console.log("⚠️  Webhook secret not configured, skipping signature verification");
+    return res.status(400).send("Webhook secret not configured");
+  }
+
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+  } catch (err) {
+    console.log(`⚠️  Webhook signature verification failed:`, err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  // Handle payment_intent.succeeded for tiered fee calculation
+  if (event.type === "payment_intent.succeeded") {
+    const paymentIntent = event.data.object;
+
+    try {
+      // Check if payment method is Interac
+      const paymentMethod = await stripe.paymentMethods.retrieve(
+        paymentIntent.payment_method
+      );
+
+      // Interac gets 1.0% fee, credit cards get 0.5% fee
+      const isInterac = paymentMethod.type === "interac_present";
+      const feePercent = isInterac ? 1.0 : APP_FEE_PERCENT;
+
+      console.log(`Payment ${paymentIntent.id}: ${paymentMethod.type} - ${feePercent}% fee`);
+
+      // If Interac and we have a connected account, adjust the fee
+      if (isInterac && paymentIntent.transfer_data?.destination) {
+        const baseFeePaid = Math.round(paymentIntent.amount * (APP_FEE_PERCENT / 100));
+        const targetFee = Math.round(paymentIntent.amount * (feePercent / 100));
+        const additionalFee = targetFee - baseFeePaid;
+
+        if (additionalFee > 0) {
+          // Create an additional transfer to collect the extra 0.5% for Interac
+          await stripe.transfers.create({
+            amount: additionalFee,
+            currency: paymentIntent.currency,
+            destination: process.env.STRIPE_PLATFORM_ACCOUNT || "self",
+            source_transaction: paymentIntent.charges.data[0].id,
+            description: `Interac surcharge for ${paymentIntent.id}`,
+            metadata: {
+              payment_intent: paymentIntent.id,
+              fee_type: "interac_surcharge",
+            },
+          }, {
+            stripeAccount: paymentIntent.transfer_data.destination,
+          });
+
+          console.log(`✓ Applied additional ${additionalFee} cents Interac fee`);
+        }
+      }
+    } catch (err) {
+      console.error("Error processing tiered fee:", err.message);
+    }
+  }
+
+  res.json({ received: true });
+});
+
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`POSUniversal backend running on port ${PORT}`);
-  console.log(`Platform fee: ${APP_FEE_PERCENT}%`);
+  console.log(`Platform fee: ${APP_FEE_PERCENT}% (credit) / 1.0% (Interac debit)`);
 });
