@@ -128,10 +128,13 @@ app.post("/connect/onboarding-link", async (req, res) => {
       return res.status(400).json({ error: "account_id is required" });
     }
 
+    // Force HTTPS for Railway deployment
+    const baseURL = process.env.BACKEND_URL || "https://posuniversal-backend-production.up.railway.app";
+
     const accountLink = await stripe.accountLinks.create({
       account: account_id,
-      refresh_url: `${process.env.BACKEND_URL || req.protocol + "://" + req.get("host")}/connect/refresh?account_id=${account_id}`,
-      return_url: `${process.env.BACKEND_URL || req.protocol + "://" + req.get("host")}/connect/complete?account_id=${account_id}`,
+      refresh_url: `${baseURL}/connect/refresh?account_id=${account_id}`,
+      return_url: `${baseURL}/connect/complete?account_id=${account_id}`,
       type: "account_onboarding",
     });
 
