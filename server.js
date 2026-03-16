@@ -9,6 +9,10 @@ app.use(cors());
 const PORT = process.env.PORT || 4242;
 const APP_FEE_PERCENT = parseFloat(process.env.APP_FEE_PERCENT || "0.5"); // Your cut: 0.5% default
 
+// Stripe Canada card-present processing fees
+const STRIPE_FEE_INTERAC = 15; // $0.15 flat fee for Interac debit
+const STRIPE_FEE_CREDIT_PERCENT = 2.7; // 2.7% for credit card present
+
 // ============================================
 // STRIPE WEBHOOKS - Tiered Platform Fees
 // ============================================
@@ -32,45 +36,32 @@ app.post("/webhook", express.raw({ type: "application/json" }), async (req, res)
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  // Handle payment_intent.succeeded for tiered fee calculation
+  // Handle payment_intent.succeeded to log actual fees
   if (event.type === "payment_intent.succeeded") {
     const paymentIntent = event.data.object;
 
     try {
-      // Check if payment method is Interac
+      // Check actual payment method type
       const paymentMethod = await stripe.paymentMethods.retrieve(
         paymentIntent.payment_method
       );
 
-      // Interac gets 1.0% fee, credit cards get 0.5% fee
       const isInterac = paymentMethod.type === "interac_present";
-      const feePercent = isInterac ? 1.0 : APP_FEE_PERCENT;
+      const paymentType = isInterac ? "Interac" : "Credit";
+      const amount = paymentIntent.amount;
+      const appFee = paymentIntent.application_fee_amount || 0;
 
-      console.log(`💳 Payment ${paymentIntent.id}: ${paymentMethod.type} - ${feePercent}% fee`);
+      console.log(`💳 Payment succeeded: $${(amount / 100).toFixed(2)} ${paymentType}`);
+      console.log(`   App fee collected: $${(appFee / 100).toFixed(2)} (${((appFee / amount) * 100).toFixed(2)}%)`);
+      console.log(`   Vendor receives: $${((amount - appFee) / 100).toFixed(2)}`);
 
-      // If Interac and we have a connected account, adjust the fee
-      if (isInterac && paymentIntent.transfer_data?.destination) {
-        const baseFeePaid = Math.round(paymentIntent.amount * (APP_FEE_PERCENT / 100));
-        const targetFee = Math.round(paymentIntent.amount * (feePercent / 100));
-        const additionalFee = targetFee - baseFeePaid;
-
-        if (additionalFee > 0) {
-          // Create an additional transfer to collect the extra 0.5% for Interac
-          await stripe.transfers.create({
-            amount: additionalFee,
-            currency: paymentIntent.currency,
-            destination: process.env.STRIPE_PLATFORM_ACCOUNT || "self",
-            source_transaction: paymentIntent.charges.data[0].id,
-            description: `Interac surcharge for ${paymentIntent.id}`,
-            metadata: {
-              payment_intent: paymentIntent.id,
-              fee_type: "interac_surcharge",
-            },
-          }, {
-            stripeAccount: paymentIntent.transfer_data.destination,
-          });
-
-          console.log(`✅ Applied additional ${additionalFee} cents Interac fee`);
+      // Log if we might have over-collected on credit cards
+      if (!isInterac && appFee > 0) {
+        // For credit cards, optimal fee would be 2.7% Stripe + 0.5% platform = 3.2%
+        const optimalFee = Math.round(amount * 0.032);
+        if (appFee > optimalFee) {
+          const overcharge = appFee - optimalFee;
+          console.log(`   ⚠️  May have over-collected $${(overcharge / 100).toFixed(2)} on credit (vs 3.2% optimal)`);
         }
       }
     } catch (error) {
@@ -312,9 +303,21 @@ app.post("/create-payment-intent", async (req, res) => {
     };
 
     // If vendor has a connected account, use destination charge
-    // Money goes to vendor, platform takes APP_FEE_PERCENT
+    // Application fee must cover: Stripe processing fee + platform margin
     if (connected_account_id) {
-      const appFee = Math.round(amount * (APP_FEE_PERCENT / 100));
+      // Estimate Stripe processing fee (use worst case = higher of Interac flat or credit %)
+      const creditCardFee = Math.round(amount * (STRIPE_FEE_CREDIT_PERCENT / 100));
+      const estimatedStripeFee = Math.max(STRIPE_FEE_INTERAC, creditCardFee);
+
+      // Platform margin: 1.0% for Interac, 0.5% for credit
+      // Use 1.0% conservatively since we don't know payment type yet
+      const platformMargin = Math.round(amount * 0.01); // 1.0%
+
+      // Total application fee = Stripe fee + platform margin
+      const appFee = estimatedStripeFee + platformMargin;
+
+      console.log(`💰 Amount: $${(amount / 100).toFixed(2)} | Stripe fee estimate: $${(estimatedStripeFee / 100).toFixed(2)} | Platform: $${(platformMargin / 100).toFixed(2)} | Total app fee: $${(appFee / 100).toFixed(2)}`);
+
       params.application_fee_amount = appFee;
       params.transfer_data = {
         destination: connected_account_id,
@@ -394,5 +397,7 @@ app.post("/check-interac", async (req, res) => {
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`POSUniversal backend running on port ${PORT}`);
-  console.log(`Platform fee: ${APP_FEE_PERCENT}% (credit) / 1.0% (Interac debit)`);
+  console.log(`Platform margin: ${APP_FEE_PERCENT}% (credit) / 1.0% (Interac)`);
+  console.log(`Stripe processing: 2.7% (credit) / $0.15 flat (Interac)`);
+  console.log(`Total platform fee charged: Stripe fee + platform margin`);
 });
